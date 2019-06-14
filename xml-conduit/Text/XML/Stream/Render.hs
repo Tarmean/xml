@@ -162,9 +162,9 @@ renderEvent yield' RenderSettings { rsPretty = isPretty, rsNamespaces = namespac
                 mnext <- peekC
                 isClosed <-
                     case mnext of
-                        Just (Chunk (EventEndElement n2)) | n1 == n2 -> do
-                            dropC 1
-                            return True
+                        -- Just (Chunk (EventEndElement n2)) | n1 == n2 -> do
+                        --     dropC 1
+                        --     return True
                         _ -> return False
                 let (token, nslevels') = mkBeginToken isPretty isClosed namespaces0 nslevels n1 as
                 yield' $ Chunk token
@@ -312,16 +312,17 @@ prettify' level =
     go e@EventBeginElement{} = do
         yield' before
         yield' e
-        mnext <- peekC
+        mnext <- checkSpecialCase e
         case mnext of
-            Just (Chunk next@EventEndElement{}) -> do
-                dropC 1
-                yield' next
-                yield' after
-                prettify' level
-            _ -> do
+            Open _ -> do
                 yield' after
                 prettify' $ level + 1
+
+            SingletonClause _ content close -> do
+                yield' content
+                yield' close
+                yield' after
+                prettify' level
     go e@EventEndElement{} = do
         let level' = max 0 $ level - 1
         yield' $ before' level'
@@ -376,9 +377,37 @@ prettify' level =
         t' = T.unwords $ T.words t
     normalize c = Just c
 
-    before = EventContent $ ContentText $ T.replicate level "    "
-    before' l = EventContent $ ContentText $ T.replicate l "    "
+    before = EventContent $ ContentText $ T.replicate level "  "
+    before' l = EventContent $ ContentText $ T.replicate l "  "
     after = EventContent $ ContentText "\n"
+
+checkSpecialCase :: Monad m => Event -> ConduitT (Flush Event) (Flush Event) m SpecialCase
+checkSpecialCase o = do
+    let recurse
+         = do
+            a <- await
+            case a of
+              Just (Flush) -> yield Flush >> recurse
+              Just (Chunk e) -> pure (Just e)
+              Nothing -> pure Nothing
+        putBack = maybe (return ()) (leftover . Chunk)
+    l1 <- recurse
+
+    case l1 of
+        Just a@(EventContent {}) -> do
+            l2 <- recurse
+            case l2 of
+                Just b@(EventEndElement{}) -> do
+                    pure (SingletonClause o a b)
+                _ -> do
+                    putBack l2
+                    putBack l1
+                    pure (Open o)
+        _ -> do
+            putBack l1
+            pure (Open o)
+data SpecialCase = Open Event | SingletonClause Event Event Event
+
 
 nubAttrs :: [(Name, v)] -> [(Name, v)]
 nubAttrs orig =
